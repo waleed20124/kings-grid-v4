@@ -12,7 +12,12 @@ const ROOM_TTL_MS = 2 * 60 * 1000;
 
 const app = express();
 const httpServer = createHttpServer(app);
-const io = new Server(httpServer);
+const io = new Server(httpServer, {
+  cors: {
+    origin: "*",
+    methods: ["GET", "POST"]
+  }
+});
 const rooms = new Map();
 
 if (process.env.NODE_ENV === "production") {
