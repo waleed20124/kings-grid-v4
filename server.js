@@ -14,7 +14,7 @@ const app = express();
 const httpServer = createHttpServer(app);
 const io = new Server(httpServer, {
   cors: {
-    origin: "*",
+    origin: "https://sparkly-faun-b35556.netlify.app",
     methods: ["GET", "POST"]
   }
 });
