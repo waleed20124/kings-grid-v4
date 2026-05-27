@@ -21,7 +21,7 @@ if (process.env.NODE_ENV === "production") {
   app.use((_req, res) => res.sendFile(path.join(__dirname, "dist", "index.html")));
 } else {
   const vite = await createViteServer({
-    server: { middlewareMode: true, host: "127.0.0.1" },
+    server: { middlewareMode: true, host: "0.0.0.0" },
     appType: "spa",
   });
   app.use(vite.middlewares);
@@ -128,8 +128,8 @@ io.on("connection", (socket) => {
   });
 });
 
-httpServer.listen(PORT, "127.0.0.1", () => {
-  console.log(`King's Grid online server running at http://127.0.0.1:${PORT}`);
+httpServer.listen(PORT, "0.0.0.0", () => {
+  console.log(`King's Grid online server running on 0.0.0.0:${PORT}`);
 });
 
 function getOrCreateRoom(roomId, timeControlMinutes) {
