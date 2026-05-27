@@ -14,7 +14,7 @@ import {
 } from "./rules/quoridor.js";
 import "./styles.css";
 
-const socket = io("https://kings-grid-v4.onrender.com");
+const socket = io("https://kings-grid-v4-1.onrender.com");
 
 function useGameAudio(enabled) {
   const contextRef = useRef(null);
