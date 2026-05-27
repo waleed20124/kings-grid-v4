@@ -55,6 +55,7 @@ function App() {
   const [phase, setPhase] = useState("lobby");
   const [joinError, setJoinError] = useState("");
   const [room, setRoom] = useState(null);
+  const [chatMessages, setChatMessages] = useState([]);
   const [orientation, setOrientation] = useState("horizontal");
   const [hoveredWall, setHoveredWall] = useState(null);
   const [soundEnabled, setSoundEnabled] = useState(true);
@@ -65,6 +66,7 @@ function App() {
   useEffect(() => {
     function handleSync(nextRoom) {
       setRoom(nextRoom);
+      setChatMessages(nextRoom.messages ?? []);
       setPhase(nextRoom.started ? "game" : "waiting");
 
       if (lastTurnRef.current && lastTurnRef.current !== nextRoom.state.currentPlayer) {
@@ -83,29 +85,31 @@ function App() {
 
     function handleStart(nextRoom) {
       setRoom(nextRoom);
+      setChatMessages(nextRoom.messages ?? []);
       setPhase("game");
       playSound("join");
     }
 
-    function handleTimer(update) {
-      setRoom((current) => (current ? { ...current, timers: update.timers, paused: update.paused } : current));
-    }
-
     function handleGameOver({ state }) {
       setRoom(state);
+      setChatMessages(state.messages ?? []);
       setPhase("game");
       playSound("win");
     }
 
+    function handleMessage(message) {
+      setChatMessages((current) => (current.some((item) => item.id === message.id) ? current : [...current, message]));
+    }
+
     socket.on("syncState", handleSync);
     socket.on("startGame", handleStart);
-    socket.on("updateTimer", handleTimer);
     socket.on("gameOver", handleGameOver);
+    socket.on("receiveMessage", handleMessage);
     return () => {
       socket.off("syncState", handleSync);
       socket.off("startGame", handleStart);
-      socket.off("updateTimer", handleTimer);
       socket.off("gameOver", handleGameOver);
+      socket.off("receiveMessage", handleMessage);
     };
   }, [playSound]);
 
@@ -120,6 +124,7 @@ function App() {
       }
 
       setRoom(response.state);
+      setChatMessages(response.state.messages ?? []);
       setPhase(response.state.started ? "game" : "waiting");
     });
   }
@@ -135,6 +140,7 @@ function App() {
   return (
     <OnlineGame
       room={room}
+      chatMessages={chatMessages}
       orientation={orientation}
       hoveredWall={hoveredWall}
       soundEnabled={soundEnabled}
@@ -149,11 +155,10 @@ function App() {
 function Lobby({ onJoin, joining, error }) {
   const [username, setUsername] = useState("");
   const [roomId, setRoomId] = useState(makeRoomId());
-  const [timeControlMinutes, setTimeControlMinutes] = useState(5);
 
   function submit(event) {
     event.preventDefault();
-    onJoin({ username, roomId, timeControlMinutes });
+    onJoin({ username, roomId });
   }
 
   return (
@@ -180,21 +185,6 @@ function Lobby({ onJoin, joining, error }) {
           </div>
         </label>
 
-        <div className="tool-panel" aria-label="Timer length">
-          <div className="tool-title">
-            <span>Timer</span>
-            <strong>{timeControlMinutes} min</strong>
-          </div>
-          <div className="segmented">
-            <button type="button" className={timeControlMinutes === 5 ? "selected" : ""} onClick={() => setTimeControlMinutes(5)}>
-              5 min
-            </button>
-            <button type="button" className={timeControlMinutes === 10 ? "selected" : ""} onClick={() => setTimeControlMinutes(10)}>
-              10 min
-            </button>
-          </div>
-        </div>
-
         {error && <div className="message-bar error">{error}</div>}
 
         <button className="primary-button" type="submit" disabled={joining}>
@@ -206,7 +196,7 @@ function Lobby({ onJoin, joining, error }) {
   );
 }
 
-function OnlineGame({ room, orientation, hoveredWall, soundEnabled, onOrientation, onWallHover, onSoundToggle, onLeave }) {
+function OnlineGame({ room, chatMessages, orientation, hoveredWall, soundEnabled, onOrientation, onWallHover, onSoundToggle, onLeave }) {
   const state = room?.state ?? createInitialState();
   const myColor = room?.viewerColor;
   const opponentColor = myColor === "white" ? "black" : "white";
@@ -229,6 +219,10 @@ function OnlineGame({ room, orientation, hoveredWall, soundEnabled, onOrientatio
     socket.emit("placeWall", { row, col, orientation });
   }
 
+  function handleSendMessage(message) {
+    socket.emit("chatMessage", { message });
+  }
+
   return (
     <main className="app-shell">
       <section className="game-stage online" aria-label="Online Quoridor game">
@@ -243,7 +237,6 @@ function OnlineGame({ room, orientation, hoveredWall, soundEnabled, onOrientatio
             color={myColor ?? "white"}
             title="You"
             username={room?.players?.[myColor]?.username ?? "You"}
-            timer={room?.timers?.[myColor] ?? 0}
             walls={state.players[myColor ?? "white"].walls}
             active={state.currentPlayer === myColor && !state.winner}
             connected
@@ -252,7 +245,6 @@ function OnlineGame({ room, orientation, hoveredWall, soundEnabled, onOrientatio
             color={opponentColor}
             title="Opponent"
             username={opponent?.username ?? "Waiting..."}
-            timer={room?.timers?.[opponentColor] ?? 0}
             walls={state.players[opponentColor].walls}
             active={state.currentPlayer === opponentColor && !state.winner}
             connected={Boolean(opponent?.connected)}
@@ -302,6 +294,7 @@ function OnlineGame({ room, orientation, hoveredWall, soundEnabled, onOrientatio
             onMove={handleMove}
             onWall={handleWall}
             onWallHover={onWallHover}
+            flipped={myColor === "black"}
           />
           <div className="goal-labels">
             <span>{PLAYERS.black.label} goal</span>
@@ -324,8 +317,9 @@ function OnlineGame({ room, orientation, hoveredWall, soundEnabled, onOrientatio
           </div>
           <div className="rule-card">
             <strong>Server synced</strong>
-            <p>Moves, walls, turns, clocks, and wins are validated by the Node.js room server.</p>
+            <p>Moves, walls, turns, and wins are validated by the Node.js room server.</p>
           </div>
+          <ChatPanel messages={chatMessages} myColor={myColor} onSend={handleSendMessage} />
         </aside>
       </section>
 
@@ -345,7 +339,7 @@ function OnlineGame({ room, orientation, hoveredWall, soundEnabled, onOrientatio
   );
 }
 
-function PlayerCard({ color, title, username, timer, walls, active, connected }) {
+function PlayerCard({ color, title, username, walls, active, connected }) {
   return (
     <article className={`player-card ${color} ${active ? "active" : ""}`}>
       <div className={`portrait ${color}`}>
@@ -354,13 +348,13 @@ function PlayerCard({ color, title, username, timer, walls, active, connected })
       <div>
         <p>{title}</p>
         <strong>{username}</strong>
-        <span>{labelFor(color)} · {walls} walls · {connected ? formatTime(timer) : "offline"}</span>
+        <span>{labelFor(color)} - {walls} walls - {connected ? "online" : "offline"}</span>
       </div>
     </article>
   );
 }
 
-function GameBoard({ state, legalMoveKeys, orientation, preview, previewKeys, canAct, onMove, onWall, onWallHover }) {
+function GameBoard({ state, legalMoveKeys, orientation, preview, previewKeys, canAct, onMove, onWall, onWallHover, flipped }) {
   const placedSegmentKeys = new Set(
     state.walls.flatMap((wall) =>
       getWallSegments(wall.row, wall.col, wall.orientation).map((segment) => `${segment.row}:${segment.col}`)
@@ -368,7 +362,7 @@ function GameBoard({ state, legalMoveKeys, orientation, preview, previewKeys, ca
   );
 
   return (
-    <div className="board-frame">
+    <div className={`board-frame ${flipped ? "flipped" : ""}`}>
       <div className="board-grid" aria-label="9 by 9 Quoridor board">
         {Array.from({ length: MATRIX_SIZE }, (_, row) =>
           Array.from({ length: MATRIX_SIZE }, (_, col) => {
@@ -419,6 +413,55 @@ function GameBoard({ state, legalMoveKeys, orientation, preview, previewKeys, ca
   );
 }
 
+function ChatPanel({ messages, myColor, onSend }) {
+  const [draft, setDraft] = useState("");
+  const listRef = useRef(null);
+
+  useEffect(() => {
+    if (listRef.current) {
+      listRef.current.scrollTop = listRef.current.scrollHeight;
+    }
+  }, [messages]);
+
+  function submit(event) {
+    event.preventDefault();
+    const message = draft.trim();
+    if (!message) return;
+    onSend(message);
+    setDraft("");
+  }
+
+  return (
+    <section className="chat-panel" aria-label="Room chat">
+      <div className="chat-header">
+        <span>Chat</span>
+      </div>
+      <div className="chat-list" ref={listRef}>
+        {messages.length === 0 ? (
+          <p className="chat-empty">No messages yet.</p>
+        ) : (
+          messages.map((item) => (
+            <article className={`chat-message ${item.color === myColor ? "mine" : ""}`} key={item.id}>
+              <strong>{item.username}</strong>
+              <p>{item.message}</p>
+            </article>
+          ))
+        )}
+      </div>
+      <form className="chat-form" onSubmit={submit}>
+        <input
+          aria-label="Chat message"
+          maxLength={280}
+          placeholder="Message"
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+        />
+        <button type="submit">Send</button>
+      </form>
+    </section>
+  );
+}
+
 function Pawn({ color }) {
   return (
     <span className={`pawn ${color}`}>
@@ -454,12 +497,6 @@ function getStatusText({ room, state, myTurn, waiting, activePlayer }) {
 
 function labelFor(color) {
   return PLAYERS[color]?.label ?? "Unassigned";
-}
-
-function formatTime(totalSeconds) {
-  const minutes = Math.floor(Math.max(0, totalSeconds) / 60);
-  const seconds = Math.max(0, totalSeconds) % 60;
-  return `${minutes}:${String(seconds).padStart(2, "0")}`;
 }
 
 function makeRoomId() {

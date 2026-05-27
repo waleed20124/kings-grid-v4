@@ -8,7 +8,6 @@ import { createInitialState, makeMove, placeWall, PLAYERS } from "./src/rules/qu
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT ?? 3000);
-const DEFAULT_TIME_MINUTES = 5;
 const ROOM_TTL_MS = 2 * 60 * 1000;
 
 const app = express();
@@ -31,8 +30,7 @@ io.on("connection", (socket) => {
   socket.on("joinRoom", (payload = {}, reply) => {
     const username = cleanText(payload.username, "Player");
     const roomId = cleanRoomId(payload.roomId);
-    const timeControlMinutes = normalizeTimeControl(payload.timeControlMinutes);
-    const room = getOrCreateRoom(roomId, timeControlMinutes);
+    const room = getOrCreateRoom(roomId);
     const existingColor = findPlayerColor(room, username);
     const openColor = existingColor ?? findOpenColor(room);
 
@@ -56,7 +54,6 @@ io.on("connection", (socket) => {
 
     if (room.started && room.paused && bothPlayersConnected(room) && !room.state.winner) {
       room.paused = false;
-      room.lastTickAt = Date.now();
       room.state = withMessage(room.state, `${PLAYERS[room.state.currentPlayer].label} to move.`);
     }
 
@@ -72,7 +69,6 @@ io.on("connection", (socket) => {
     const room = roomForSocket(socket);
     if (!canAct(room, socket)) return;
 
-    commitClock(room);
     const next = makeMove(room.state, Number(row), Number(col));
     if (next.messageType === "error") {
       socket.emit("syncState", buildClientRoom(room, socket.data.color, next));
@@ -80,7 +76,6 @@ io.on("connection", (socket) => {
     }
 
     room.state = next;
-    room.lastTickAt = Date.now();
     finishTurn(room);
   });
 
@@ -88,7 +83,6 @@ io.on("connection", (socket) => {
     const room = roomForSocket(socket);
     if (!canAct(room, socket)) return;
 
-    commitClock(room);
     const next = placeWall(room.state, Number(row), Number(col), orientation);
     if (next.messageType === "error") {
       socket.emit("syncState", buildClientRoom(room, socket.data.color, next));
@@ -96,8 +90,27 @@ io.on("connection", (socket) => {
     }
 
     room.state = next;
-    room.lastTickAt = Date.now();
     finishTurn(room);
+  });
+
+  socket.on("chatMessage", (payload = {}) => {
+    const room = roomForSocket(socket);
+    if (!room) return;
+
+    const message = cleanChatMessage(payload.message);
+    if (!message) return;
+
+    const chatMessage = {
+      id: `${Date.now()}-${socket.id}`,
+      username: socket.data.username,
+      color: socket.data.color,
+      message,
+      sentAt: Date.now(),
+    };
+
+    room.messages.push(chatMessage);
+    room.messages = room.messages.slice(-100);
+    io.to(room.id).emit("receiveMessage", chatMessage);
   });
 
   socket.on("syncState", () => {
@@ -117,7 +130,6 @@ io.on("connection", (socket) => {
     }
 
     if (room.started && !room.state.winner) {
-      commitClock(room);
       room.paused = true;
       room.state = withMessage(room.state, `${PLAYERS[color].label} disconnected. Waiting for reconnection.`);
       socket.to(room.id).emit("opponentDisconnected", { color, username: room.players[color]?.username });
@@ -132,22 +144,18 @@ httpServer.listen(PORT, "0.0.0.0", () => {
   console.log(`King's Grid online server running on 0.0.0.0:${PORT}`);
 });
 
-function getOrCreateRoom(roomId, timeControlMinutes) {
+function getOrCreateRoom(roomId) {
   const existing = rooms.get(roomId);
   if (existing) return existing;
 
-  const timeMs = timeControlMinutes * 60 * 1000;
   const room = {
     id: roomId,
     started: false,
     paused: false,
     state: createInitialState(),
     players: { white: null, black: null },
-    timers: { white: timeMs, black: timeMs },
-    timeControlMinutes,
-    lastTickAt: null,
-    timerInterval: null,
-    cleanupTimer: null,
+    messages: [],
+    cleanupHandle: null,
   };
   rooms.set(roomId, room);
   return room;
@@ -158,53 +166,28 @@ function startRoom(room) {
   room.paused = false;
   room.state = createInitialState();
   room.state = withMessage(room.state, "Both players are in. White begins.");
-  room.lastTickAt = Date.now();
-  room.timerInterval = setInterval(() => tickRoom(room), 1000);
   io.to(room.id).emit("startGame", buildClientRoom(room));
   emitRoomState(room);
 }
 
 function finishTurn(room) {
   if (room.state.winner) {
-    endRoom(room, room.state.winner, "goal");
+    endRoom(room, room.state.winner);
     return;
   }
 
   emitRoomState(room);
-  emitTimer(room);
 }
 
-function tickRoom(room) {
-  if (!room.started || room.paused || room.state.winner) return;
-  commitClock(room);
-  const active = room.state.currentPlayer;
-
-  if (room.timers[active] <= 0) {
-    room.timers[active] = 0;
-    endRoom(room, opponentOf(active), "timeout");
-    return;
-  }
-
-  emitTimer(room);
-}
-
-function commitClock(room) {
-  if (!room.started || room.paused || room.state.winner || !room.lastTickAt) return;
-  const now = Date.now();
-  const elapsed = now - room.lastTickAt;
-  room.lastTickAt = now;
-  room.timers[room.state.currentPlayer] = Math.max(0, room.timers[room.state.currentPlayer] - elapsed);
-}
-
-function endRoom(room, winner, reason) {
+function endRoom(room, winner) {
   room.state = {
     ...room.state,
     winner,
-    message: reason === "timeout" ? `${PLAYERS[opponentOf(winner)].label} ran out of time.` : room.state.message,
+    message: room.state.message,
     messageType: "success",
   };
   emitRoomState(room);
-  io.to(room.id).emit("gameOver", { winner, reason, state: buildClientRoom(room) });
+  io.to(room.id).emit("gameOver", { winner, reason: "goal", state: buildClientRoom(room) });
 }
 
 function emitRoomState(room) {
@@ -212,14 +195,6 @@ function emitRoomState(room) {
     const socketId = room.players[color]?.socketId;
     if (socketId) io.to(socketId).emit("syncState", buildClientRoom(room, color));
   }
-}
-
-function emitTimer(room) {
-  io.to(room.id).emit("updateTimer", {
-    timers: roundedTimers(room.timers),
-    currentPlayer: room.state.currentPlayer,
-    paused: room.paused,
-  });
 }
 
 function buildClientRoom(room, viewerColor = null, stateOverride = null) {
@@ -233,8 +208,7 @@ function buildClientRoom(room, viewerColor = null, stateOverride = null) {
       white: publicPlayer(room.players.white),
       black: publicPlayer(room.players.black),
     },
-    timers: roundedTimers(room.timers),
-    timeControlMinutes: room.timeControlMinutes,
+    messages: room.messages,
   };
 }
 
@@ -244,13 +218,6 @@ function publicPlayer(player) {
     username: player.username,
     color: player.color,
     connected: player.connected,
-  };
-}
-
-function roundedTimers(timers) {
-  return {
-    white: Math.max(0, Math.ceil(timers.white / 1000)),
-    black: Math.max(0, Math.ceil(timers.black / 1000)),
   };
 }
 
@@ -276,25 +243,15 @@ function bothPlayersConnected(room) {
 }
 
 function scheduleRoomCleanup(room) {
-  clearTimeout(room.cleanupTimer);
-  room.cleanupTimer = setTimeout(() => {
+  clearTimeout(room.cleanupHandle);
+  room.cleanupHandle = setTimeout(() => {
     if (room.players.white?.connected || room.players.black?.connected) return;
-    clearInterval(room.timerInterval);
     rooms.delete(room.id);
   }, ROOM_TTL_MS);
 }
 
 function withMessage(state, message) {
   return { ...state, message, messageType: "neutral" };
-}
-
-function opponentOf(color) {
-  return color === "white" ? "black" : "white";
-}
-
-function normalizeTimeControl(value) {
-  const minutes = Number(value);
-  return [5, 10].includes(minutes) ? minutes : DEFAULT_TIME_MINUTES;
 }
 
 function cleanRoomId(value) {
@@ -305,4 +262,8 @@ function cleanRoomId(value) {
 function cleanText(value, fallback) {
   const text = String(value ?? "").trim().replace(/\s+/g, " ");
   return text.slice(0, 22) || fallback;
+}
+
+function cleanChatMessage(value) {
+  return String(value ?? "").trim().replace(/\s+/g, " ").slice(0, 280);
 }
